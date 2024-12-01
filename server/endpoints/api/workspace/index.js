@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require("uuid");
 const { Document } = require("../../../models/documents");
 const { Telemetry } = require("../../../models/telemetry");
 const { DocumentVectors } = require("../../../models/vectors");
+const { LanceDb } = require("../../../utils/vectorDbProviders/lance");
 const { Workspace } = require("../../../models/workspace");
 const { WorkspaceChats } = require("../../../models/workspaceChats");
 const { getVectorDbClass } = require("../../../utils/helpers");
@@ -14,72 +15,238 @@ const {
   writeResponseChunk,
 } = require("../../../utils/helpers/chat/responses");
 const { ApiChatHandler } = require("../../../utils/chats/apiChatHandler");
-
+const prisma = require("../../../utils/prisma");
+const { WorkspaceSuggestedMessages } = require("../../../models/workspacesSuggestedMessages");
 function apiWorkspaceEndpoints(app) {
   if (!app) return;
 
-  app.post("/v1/workspace/new", [validApiKey], async (request, response) => {
-    /*
-    #swagger.tags = ['Workspaces']
-    #swagger.description = 'Create a new workspace'
-    #swagger.requestBody = {
-      description: 'JSON object containing new display name of workspace.',
-      required: true,
-      content: {
-        "application/json": {
-          example: {
-            name: "My New Workspace",
-          }
-        }
-      }
-    }
-    #swagger.responses[200] = {
-      content: {
-        "application/json": {
-          schema: {
-            type: 'object',
-            example: {
-              workspace: {
-                "id": 79,
-                "name": "Sample workspace",
-                "slug": "sample-workspace",
-                "createdAt": "2023-08-17 00:45:03",
-                "openAiTemp": null,
-                "lastUpdatedAt": "2023-08-17 00:45:03",
-                "openAiHistory": 20,
-                "openAiPrompt": null
-              },
-              message: 'Workspace created'
-            }
-          }
-        }
-      }
-    }
-    #swagger.responses[403] = {
-      schema: {
-        "$ref": "#/definitions/InvalidAPIKey"
-      }
-    }
-    */
+  app.post("/create-with-documents", async (request, response) => {
     try {
-      const { name = null } = reqBody(request);
-      const { workspace, message } = await Workspace.new(name);
-      await Telemetry.sendTelemetry("workspace_created", {
-        multiUserMode: multiUserMode(response),
-        LLMSelection: process.env.LLM_PROVIDER || "openai",
-        Embedder: process.env.EMBEDDING_ENGINE || "inherit",
-        VectorDbSelection: process.env.VECTOR_DB || "lancedb",
-        TTSSelection: process.env.TTS_PROVIDER || "native",
+      const { name, documents } = request.body;
+
+      if (!name || !documents || !Array.isArray(documents)) {
+        response.status(400).json({
+          success: false,
+          error: "Nome do workspace e array de documentos são obrigatórios",
+        });
+        return;
+      }
+      console.log("criando workspace");
+      // Criar o workspace
+      const { workspace, message: workspaceError } = await Workspace.new(name);
+      if (!workspace) {
+        response.status(500).json({
+          success: false,
+          error: workspaceError || "Falha ao criar workspace",
+        });
+        return;
+      }
+
+      const documentVectors = [];
+
+      // Conectar ao LanceDB
+      const { client } = await LanceDb.connect();
+
+      // Array para armazenar os nomes dos documentos para gerar mensagens sugeridas
+      const documentNames = [];
+
+      for (const doc of documents) {
+        // Criar registro do documento usando Prisma diretamente
+        const docId = uuidv4();
+        await prisma.workspace_documents.create({
+          data: {
+            docId,
+            workspaceId: workspace.id,
+            filename: doc.name_file,
+            docpath: doc.name_file,
+            metadata: JSON.stringify({
+              title: doc.name_text,
+              hash: doc.hash_file,
+              document_idx: doc.document_idx,
+              len_chunks: doc.len_chunks,
+            }),
+          },
+        });
+
+        documentNames.push(doc.name_text);
+
+        // Preparar dados para o LanceDB
+        const submissions = [];
+
+        // Processar cada chunk do documento
+        doc.vector.forEach((chunk) => {
+          const vectorId = uuidv4();
+          submissions.push({
+            id: vectorId,
+            vector: chunk.embedding,
+            text: chunk.text,
+            hash_file: chunk.hash_file,
+            name_file: chunk.name_file,
+            name_text: chunk.name_text,
+            tokens_count: chunk.tokens_count,
+            idx_chunk: chunk.idx_chunk,
+          });
+
+          documentVectors.push({
+            docId,
+            vectorId,
+          });
+        });
+
+        // Inserir no LanceDB
+        await LanceDb.updateOrCreateCollection(client, submissions, workspace.slug);
+      }
+
+      // Registrar as relações documento-vetor
+      await DocumentVectors.bulkInsert(documentVectors);
+
+      // Gerar e salvar mensagens sugeridas
+      const suggestedMessages = [
+        {
+          heading: "Visão Geral",
+          message: "Me dê uma visão geral do conteúdo desses documentos"
+        }
+      ];
+
+
+      await WorkspaceSuggestedMessages.saveAll(suggestedMessages, workspace.slug);
+
+      response.status(200).json({
+        success: true,
+        workspace,
+        message: "Workspace criado e documentos importados com sucesso",
       });
-      await EventLogs.logEvent("api_workspace_created", {
-        workspaceName: workspace?.name || "Unknown Workspace",
+    } catch (error) {
+      console.error(error);
+      response.status(500).json({
+        success: false,
+        error: error.message,
       });
-      response.status(200).json({ workspace, message });
-    } catch (e) {
-      console.error(e.message, e);
-      response.sendStatus(500).end();
     }
   });
+
+  app.post("/create-with-documents-from-url", async (request, response) => {
+    try {
+      const { name, url } = request.body;
+
+      if (!name || !url) {
+        response.status(400).json({
+          success: false,
+          error: "Nome do workspace e URL são obrigatórios",
+        });
+        return;
+      }
+
+      // Buscar o JSON da URL
+      try {
+        const jsonResponse = await fetch(url);
+        if (!jsonResponse.ok) {
+          throw new Error(`HTTP error! status: ${jsonResponse.status}`);
+        }
+        const documents = await jsonResponse.json();
+
+        if (!Array.isArray(documents)) {
+          response.status(400).json({
+            success: false,
+            error: "O JSON da URL deve conter um array de documentos",
+          });
+          return;
+        }
+
+        // Criar o workspace
+        const { workspace, message: workspaceError } = await Workspace.new(name);
+        if (!workspace) {
+          response.status(500).json({
+            success: false,
+            error: workspaceError || "Falha ao criar workspace",
+          });
+          return;
+        }
+
+        const documentVectors = [];
+
+        // Conectar ao LanceDB
+        const { client } = await LanceDb.connect();
+
+        for (const doc of documents) {
+          // Criar registro do documento usando Prisma diretamente
+          const docId = uuidv4();
+          await prisma.workspace_documents.create({
+            data: {
+              docId,
+              workspaceId: workspace.id,
+              filename: doc.name_file,
+              docpath: doc.name_file,
+              metadata: JSON.stringify({
+                title: doc.name_text,
+                hash: doc.hash_file,
+                document_idx: doc.document_idx,
+                len_chunks: doc.len_chunks,
+              }),
+            },
+          });
+
+          // Preparar dados para o LanceDB
+          const submissions = [];
+
+          // Processar cada chunk do documento
+          doc.vector.forEach((chunk) => {
+            const vectorId = uuidv4();
+            submissions.push({
+              id: vectorId,
+              vector: chunk.embedding,
+              text: chunk.text,
+              hash_file: chunk.hash_file,
+              name_file: chunk.name_file,
+              name_text: chunk.name_text,
+              tokens_count: chunk.tokens_count,
+              idx_chunk: chunk.idx_chunk,
+            });
+
+            documentVectors.push({
+              docId,
+              vectorId,
+            });
+          });
+
+          // Inserir no LanceDB
+          await LanceDb.updateOrCreateCollection(client, submissions, workspace.slug);
+        }
+
+        // Registrar as relações documento-vetor
+        await DocumentVectors.bulkInsert(documentVectors);
+
+        const suggestedMessages = [
+          {
+            heading: "Visão Geral",
+            message: "Me dê uma visão geral do conteúdo desses documentos"
+          }
+        ];
+        await WorkspaceSuggestedMessages.saveAll(suggestedMessages, workspace.slug);
+
+
+        response.status(200).json({
+          success: true,
+          workspace,
+          message: "Workspace criado e documentos importados com sucesso",
+        });
+
+      } catch (error) {
+        response.status(500).json({
+          success: false,
+          error: `Erro ao buscar ou processar JSON da URL: ${error.message}`,
+        });
+        return;
+      }
+    } catch (error) {
+      console.error(error);
+      response.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  });
+
 
   app.get("/v1/workspaces", [validApiKey], async (request, response) => {
     /*

@@ -5,6 +5,59 @@ const { validApiKey } = require("../../../utils/middleware/validApiKey");
 function apiEmbedEndpoints(app) {
   if (!app) return;
 
+  app.post("/v1/embed", [validApiKey], async (request, response) => {
+    /*
+      #swagger.tags = ['Embed']
+      #swagger.description = 'Create a new embed'
+      #swagger.requestBody = {
+        required: true,
+        content: {
+          "application/json": {
+            schema: {
+              type: 'object',
+              example: {
+                "workspace_id": 1,
+                "enabled": true,
+                "chat_mode": "query"
+              }
+            }
+          }
+        }
+      }
+      #swagger.responses[200] = {
+        content: {
+          "application/json": {
+            schema: {
+              type: 'object',
+              example: {
+                embed: {
+                  "id": 1,
+                  "uuid": "embed-uuid-1",
+                  "enabled": true,
+                  "chat_mode": "query",
+                  "workspace_id": 1,
+                  "createdAt": "2023-04-01T12:00:00Z"
+                }
+              }
+            }
+          }
+        }
+      }
+      #swagger.responses[403] = {
+        schema: {
+          "$ref": "#/definitions/InvalidAPIKey"
+        }
+      }
+    */
+    try {
+      const { embed, message: error } = await EmbedConfig.new(request.body);
+      response.status(200).json({ embed, error });
+    } catch (e) {
+      console.error(e.message, e);
+      response.sendStatus(500).end();
+    }
+  });
+
   app.get("/v1/embed", [validApiKey], async (request, response) => {
     /*
       #swagger.tags = ['Embed']
@@ -40,7 +93,7 @@ function apiEmbedEndpoints(app) {
                     },
                     "chat_count": 10
                   }
-                ] 
+                ]
               }
             }
           }

@@ -7,6 +7,7 @@ const { WorkspaceChats } = require("../../../models/workspaceChats");
 const { canModifyAdmin } = require("../../../utils/helpers/admin");
 const { multiUserMode, reqBody } = require("../../../utils/http");
 const { validApiKey } = require("../../../utils/middleware/validApiKey");
+const { WorkspaceUser } = require("../../../models/workspaceUsers");
 
 function apiAdminEndpoints(app) {
   if (!app) return;
@@ -474,6 +475,149 @@ function apiAdminEndpoints(app) {
       }
     }
   );
+
+  app.post(
+    "/v1/admin/workspaces/:workspaceId/add-user",
+    [validApiKey],
+    async (request, response) => {
+      /*
+    #swagger.tags = ['Admin']
+    #swagger.parameters['workspaceId'] = {
+      in: 'path',
+      description: 'id of the workspace in the database.',
+      required: true,
+      type: 'string'
+    }
+    #swagger.description = 'Add a single user to the workspace. Methods are disabled until multi user mode is enabled via the UI.'
+    #swagger.requestBody = {
+        description: 'User ID to add to the workspace.',
+        required: true,
+        content: {
+          "application/json": {
+            example: {
+              userId: 1
+            }
+          }
+        }
+      }
+    #swagger.responses[200] = {
+      content: {
+        "application/json": {
+          schema: {
+            type: 'object',
+            example: {
+              success: true,
+              error: null,
+            }
+          }
+        }
+      }
+    }
+    #swagger.responses[403] = {
+      schema: {
+        "$ref": "#/definitions/InvalidAPIKey"
+      }
+    }
+     #swagger.responses[401] = {
+      description: "Instance is not in Multi-User mode. Method denied",
+    }
+    */
+      try {
+        if (!multiUserMode(response)) {
+          response.sendStatus(401).end();
+          return;
+        }
+
+        const { workspaceId } = request.params;
+        const { userId } = reqBody(request);
+
+        if (!userId) {
+          response.status(400).json({ success: false, error: "userId is required" });
+          return;
+        }
+
+        const success = await WorkspaceUser.create(userId, workspaceId);
+        response.status(200).json({ success, error: success ? null : "Failed to add user to workspace" });
+      } catch (e) {
+        console.error(e);
+        response.sendStatus(500).end();
+      }
+    }
+  );
+
+  app.delete(
+    "/v1/admin/workspaces/:workspaceId/remove-user",
+    [validApiKey],
+    async (request, response) => {
+      /*
+    #swagger.tags = ['Admin']
+    #swagger.parameters['workspaceId'] = {
+      in: 'path',
+      description: 'id of the workspace in the database.',
+      required: true,
+      type: 'string'
+    }
+    #swagger.description = 'Remove a single user from the workspace. Methods are disabled until multi user mode is enabled via the UI.'
+    #swagger.requestBody = {
+        description: 'User ID to remove from the workspace.',
+        required: true,
+        content: {
+          "application/json": {
+            example: {
+              userId: 1
+            }
+          }
+        }
+      }
+    #swagger.responses[200] = {
+      content: {
+        "application/json": {
+          schema: {
+            type: 'object',
+            example: {
+              success: true,
+              error: null,
+            }
+          }
+        }
+      }
+    }
+    #swagger.responses[403] = {
+      schema: {
+        "$ref": "#/definitions/InvalidAPIKey"
+      }
+    }
+     #swagger.responses[401] = {
+      description: "Instance is not in Multi-User mode. Method denied",
+    }
+    */
+      try {
+        if (!multiUserMode(response)) {
+          response.sendStatus(401).end();
+          return;
+        }
+
+        const { workspaceId } = request.params;
+        const { userId } = reqBody(request);
+
+        if (!userId) {
+          response.status(400).json({ success: false, error: "userId is required" });
+          return;
+        }
+
+        await WorkspaceUser.delete({
+          workspace_id: Number(workspaceId),
+          user_id: Number(userId)
+        });
+
+        response.status(200).json({ success: true, error: null });
+      } catch (e) {
+        console.error(e);
+        response.sendStatus(500).end();
+      }
+    }
+  );
+
   app.post(
     "/v1/admin/workspaces/:workspaceId/update-users",
     [validApiKey],
